@@ -4,6 +4,7 @@ import ipaddress
 from hashlib import sha256
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from typing import Dict
 
 MAGICS = {
     'main': b'\xf9\xbe\xb4\xd9',
@@ -13,9 +14,11 @@ MAGICS = {
 def do_checksum(data) -> bytes:
   return sha256(sha256(data).digest()).digest()[:4]
 
+
 def main():
   node = BitcoinNode()
   node.handshake()
+
 
 class BitcoinNode:
   def __init__(self):
@@ -24,62 +27,92 @@ class BitcoinNode:
     self.socket = socket.create_connection((hosts[0], self.port))
 
   def send_version(self) -> None:
-    msg = FullMessage(VersionMessage())
+    msg = Packet(VersionMessage())
     print(msg)
     self.socket.sendall(bytes(msg))
 
   def send_verack(self) -> None:
-    verack_msg = FullMessage(VerackMessage())
+    verack_msg = Packet(VerackMessage())
     print(verack_msg)
     self.socket.sendall(bytes(verack_msg))
 
   def handshake(self) -> None:
     self.send_version()
     data = self.socket.recv(4096)
-    print(VersionMessage.from_bytes(data[24:]))
+    print(Packet.from_bytes(data))
     self.send_verack()
     data = self.socket.recv(4096)
-    print(Headers.from_bytes(data))
-    block_msg = bytes(FullMessage(GetBlocks()))
-    self.socket.sendall(block_msg)
+    print(Packet.from_bytes(data))
+    block_msg = Packet(GetBlocks())
+    print(block_msg)
+    self.socket.sendall(bytes(block_msg))
     while True:
       data = self.socket.recv(4096)
       if not data:
         break
-      print(Headers.from_bytes(data))
+      msg = Packet.from_bytes(data)
+
 
 @dataclass
-class Message(ABC):
+class Payload(ABC):
   @property
   @abstractmethod
   def command(self) -> str:
     pass
+
+  @classmethod
+  @abstractmethod
+  def from_bytes(cls, data: bytes):
+    pass
+
   @abstractmethod
   def __bytes__(self):
     pass
 
-class FullMessage:
-  def __init__(self, message: Message):
+  @abstractmethod
+  def __str__(self):
+    pass
+
+
+class Packet:
+  def __init__(self, message: Payload):
     self.payload = message
     self.headers = Headers(
-      command=message.command,
-      payload_size=len(bytes(self.payload)),
-      checksum=do_checksum(bytes(self.payload)),
+        command=message.command,
+        payload_size=len(bytes(self.payload)),
+        checksum=do_checksum(bytes(self.payload)),
     )
+
   def __bytes__(self):
     return bytes(self.headers) + bytes(self.payload)
+
   def __str__(self):
     return str(self.headers) + str(self.payload)
 
+  @classmethod
+  def from_bytes(cls, data: bytes):
+    headers = Headers.from_bytes(data[:24])
+    payload = data[24:24 + headers.payload_size]
+    assert do_checksum(payload) == headers.checksum, "Checksum failed"
+    command = headers.command
+    if command not in command_map:
+      print(f"Command not implemented: {command}")
+      return cls(message=VerackMessage())
+    return cls(message=command_map[command].from_bytes(payload))
+
+
 @dataclass
-class GetBlocks(Message):
+class GetBlocks(Payload):
   version: int = 70015
   hash_count: int = 1
-  header: bytes = bytes.fromhex('0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c')
+  header: bytes = bytes.fromhex(
+      '0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c')
   stop_hash: bytes = bytes.fromhex('')
+
   @property
   def command(self):
     return "getblocks"
+
   def __bytes__(self):
     msg = b''
     msg += self.version.to_bytes(4, "little")
@@ -88,16 +121,52 @@ class GetBlocks(Message):
     msg += b'\x00' * 32
     return msg
 
-@dataclass
-class VerackMessage(Message):
+  def __str__(self):
+    return f"""
+    version:      {self.version}
+    hash_count:   {self.hash_count}
+    header:       {self.header.hex(' ')}
+    stop_hash:    {self.stop_hash}
+  """
+
+  @classmethod
+  def from_bytes(cls, data):
+    return cls()
+
+
+class VerackMessage(Payload):
   @property
   def command(self):
     return "verack"
+
   def __bytes__(self) -> bytes:
     return b''
 
+  def __str__(self) -> str:
+    return ''
+
+  @classmethod
+  def from_bytes(cls, data):
+    return cls()
+
+class SendHeadersMessage(Payload):
+  @property
+  def command(self):
+    return "sendheaders"
+
+  def __bytes__(self) -> bytes:
+    return b''
+
+  def __str__(self) -> str:
+    return ''
+
+  @classmethod
+  def from_bytes(cls, data):
+    return cls()
+
+
 @dataclass
-class VersionMessage(Message):
+class VersionMessage(Payload):
   version: int = 70015
   svc: int = 0
   timestamp: int = int(time.time())
@@ -115,6 +184,7 @@ class VersionMessage(Message):
   @property
   def command(self):
     return "version"
+
   def __bytes__(self) -> bytes:
     version_msg = b''
     version_msg += int(self.version).to_bytes(4, "little", signed=True)
@@ -140,15 +210,16 @@ class VersionMessage(Message):
     new_msg.svc = int.from_bytes(data[4:12], "little")
     new_msg.timestamp = int.from_bytes(data[12:20], "little")
     new_msg.rx_svc = int.from_bytes(data[20:28], "little")
-    new_msg.rx_ip = ipaddress.ip_address(data[28:44]).ipv4_mapped
+    new_msg.rx_ip = ipaddress.ip_address(data[28:44])
     new_msg.rx_port = int.from_bytes(data[44:46], "little")
     new_msg.tx_svc = int.from_bytes(data[46:54], "little")
-    new_msg.tx_ip = ipaddress.ip_address(data[54:70]).ipv4_mapped
+    new_msg.tx_ip = ipaddress.ip_address(data[54:70])
     new_msg.tx_port = int.from_bytes(data[70:72], "little")
     new_msg.nonce = int.from_bytes(data[72:80], "little")
     user_agent_bytes = data[80]
     new_msg.user_agent = data[81:81 + user_agent_bytes]
-    new_msg.start_height = int.from_bytes(data[81 + user_agent_bytes:85 + user_agent_bytes], "little")
+    new_msg.start_height = int.from_bytes(
+        data[81 + user_agent_bytes:85 + user_agent_bytes], "little")
     new_msg.relay = bool(data[85 + user_agent_bytes: 86 + user_agent_bytes])
     return new_msg
 
@@ -169,6 +240,7 @@ class VersionMessage(Message):
     relay:        {self.relay}
   """
 
+
 @dataclass
 class Headers:
   command: str
@@ -179,13 +251,11 @@ class Headers:
   @classmethod
   def from_bytes(cls, data):
     return cls(
-      magic = data[:4],
-      command = data[4:16],
-      payload_size = int.from_bytes(data[16:20], "little"),
-      checksum = data[20:24]
+        magic=data[:4],
+        command=data[4:16].decode().rstrip('\x00'),
+        payload_size=int.from_bytes(data[16:20], "little"),
+        checksum=data[20:24]
     )
-
-
 
   def __bytes__(self):
     msg = b''
@@ -204,6 +274,12 @@ class Headers:
     checksum:     {self.checksum.hex(' ')}
   """
 
+command_map: Dict[str, Payload] = {
+  'version': VersionMessage,
+  "verack": VerackMessage,
+  "getblocks": GetBlocks,
+  "sendheaders": SendHeadersMessage,
+}
 
 if __name__ == "__main__":
   main()
