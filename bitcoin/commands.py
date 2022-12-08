@@ -14,7 +14,7 @@ def do_checksum(data) -> bytes:
   return sha256(sha256(data).digest()).digest()[:4]
 
 @dataclass
-class Payload(ABC):
+class Command(ABC):
   @property
   @abstractmethod
   def command(self) -> str:
@@ -35,7 +35,7 @@ class Payload(ABC):
 
 
 class Packet:
-  def __init__(self, message: Payload):
+  def __init__(self, message: Command):
     self.payload = message
     self.headers = Headers(
         command=message.command,
@@ -53,7 +53,9 @@ class Packet:
   def from_bytes(cls, data: bytes):
     headers = Headers.from_bytes(data[:24])
     payload = data[24:24 + headers.payload_size]
-    assert do_checksum(payload) == headers.checksum, "Checksum failed"
+    if do_checksum(payload) != headers.checksum:
+      print(f"Checksum failed for headers:\n{headers}")
+      return cls(message=VerackMessage())
     command = headers.command
     if command not in command_map:
       print(f"Command not implemented: {command}")
@@ -62,7 +64,7 @@ class Packet:
 
 
 @dataclass
-class GetBlocks(Payload):
+class GetBlocks(Command):
   version: int = 70015
   hash_count: int = 1
   header: bytes = bytes.fromhex(
@@ -94,7 +96,7 @@ class GetBlocks(Payload):
     return cls()
 
 
-class VerackMessage(Payload):
+class VerackMessage(Command):
   @property
   def command(self):
     return "verack"
@@ -109,7 +111,7 @@ class VerackMessage(Payload):
   def from_bytes(cls, data):
     return cls()
 
-class SendHeadersMessage(Payload):
+class SendHeadersMessage(Command):
   @property
   def command(self):
     return "sendheaders"
@@ -124,13 +126,20 @@ class SendHeadersMessage(Payload):
   def from_bytes(cls, data):
     return cls()
 
-class InvMessage(Payload):
+class InvMessage(Command):
+  @property
+  def command(self):
+    return "inv"
+  def __bytes__(self):
+    return b""
+  def __str__(self):
+    return ""
   @classmethod
   def from_bytes(cls, data):
     return cls()
 
 @dataclass
-class VersionMessage(Payload):
+class VersionMessage(Command):
   version: int = 70015
   svc: int = 0
   timestamp: int = int(time.time())
@@ -238,7 +247,7 @@ class Headers:
     checksum:     {self.checksum.hex(' ')}
   """
 
-command_map: Dict[str, Payload] = {
+command_map: Dict[str, Command] = {
   'version': VersionMessage,
   "verack": VerackMessage,
   "getblocks": GetBlocks,
