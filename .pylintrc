@@ -136,7 +136,8 @@ disable= parameter-unpacking,
         missing-function-docstring,
         missing-class-docstring,
         missing-module-docstring,
-        too-many-instance-attributes
+        too-many-instance-attributes,
+        wildcard-import
 
 
 # Enable the message, report, category or checker with the given id(s). You can
